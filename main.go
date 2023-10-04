@@ -6,15 +6,18 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/viper"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 )
 
+const httpHeaderPrivateServerID = "X-Private-Server-ID"
+
 type privateServerConnection struct {
 	ws *websocket.Conn
-	ch chan webSocketResponse
+	ch chan webSocketResponseMessage
 }
 
 var upgrader = websocket.Upgrader{}
@@ -25,7 +28,7 @@ type serverInfoMessage struct {
 	PrivateServerID string `json:"private_server_id"`
 }
 
-type webSocketMessage struct {
+type webSocketRequestMessage struct {
 	RequestID string            `json:"request_id"`
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
@@ -34,7 +37,7 @@ type webSocketMessage struct {
 	Body      string            `json:"body"`
 }
 
-type webSocketResponse struct {
+type webSocketResponseMessage struct {
 	RequestID  string            `json:"request_id"`
 	StatusCode int               `json:"status_code"`
 	Header     map[string]string `json:"header"`
@@ -85,7 +88,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("received server info message, private_server_id:", serverInfo.PrivateServerID)
 
-	ch := make(chan webSocketResponse)
+	ch := make(chan webSocketResponseMessage)
 
 	mu.Lock()
 	privateServer[serverInfo.PrivateServerID] = privateServerConnection{
@@ -95,7 +98,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	for {
-		var msg webSocketResponse
+		var msg webSocketResponseMessage
 		err := conn.ReadJSON(&msg)
 		if err != nil {
 			log.Printf("Error while reading: %v", err)
@@ -103,25 +106,26 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		ch <- msg
 	}
+	log.Printf("websocket connection closed (id:%s)\n", serverInfo.PrivateServerID)
 
 	mu.Lock()
 	delete(privateServer, serverInfo.PrivateServerID)
 	mu.Unlock()
+	log.Printf("removed private server (id:%s) from list\n", serverInfo.PrivateServerID)
 }
 
 func apiHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("API handler")
+	fmt.Println("call api handler")
 	requestID := uuid.New().String()
 
-	clientID := r.Header.Get("X-Client-ID")
-	log.Println("Client ID:", clientID)
+	serverID := r.Header.Get(httpHeaderPrivateServerID)
+	log.Println("call api for private server id:", serverID)
 
 	mu.Lock()
-	client, ok := privateServer[clientID]
+	server, ok := privateServer[serverID]
 	mu.Unlock()
-
 	if !ok {
-		http.Error(w, "Client not found", http.StatusBadGateway)
+		http.Error(w, "private server not found", http.StatusBadGateway)
 		return
 	}
 
@@ -130,30 +134,36 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		header[k] = v[0]
 	}
 
-	msg := webSocketMessage{
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
+
+	msg := webSocketRequestMessage{
+		RequestID: requestID,
 		Method:    r.Method,
 		Path:      r.URL.Path,
 		Header:    header,
 		Query:     r.URL.RawQuery,
-		Body:      "some-body", // Read and set the body content
-		RequestID: requestID,
+		Body:      string(body),
 	}
 
-	err := client.ws.WriteJSON(msg)
+	err := server.ws.WriteJSON(msg)
 	if err != nil {
 		http.Error(w, "Failed to send to client", http.StatusInternalServerError)
 		return
 	}
 
-	select {
-	case response := <-client.ch:
+	if response := <-server.ch; true {
 		for k, v := range response.Header {
 			w.Header().Set(k, v)
 		}
 		w.WriteHeader(response.StatusCode)
-		body := []byte(response.Body)
-		w.Write(body)
-		//json.NewEncoder(w).Encode(response)
+		respBody := []byte(response.Body)
+		w.Write(respBody)
+		return
 	}
+	w.WriteHeader(http.StatusInternalServerError)
 
+	log.Println("api handler finished")
 }
