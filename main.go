@@ -111,6 +111,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	delete(privateServer, serverInfo.PrivateServerID)
 	mu.Unlock()
+	close(ch)
 	log.Printf("removed private server (id:%s) from list\n", serverInfo.PrivateServerID)
 }
 
@@ -154,16 +155,19 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if response := <-server.ch; true {
-		for k, v := range response.Header {
-			w.Header().Set(k, v)
-		}
-		w.WriteHeader(response.StatusCode)
-		respBody := []byte(response.Body)
-		w.Write(respBody)
+	response, ok := <-server.ch
+	if !ok {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("private server closed connection"))
 		return
 	}
-	w.WriteHeader(http.StatusInternalServerError)
+
+	for k, v := range response.Header {
+		w.Header().Set(k, v)
+	}
+	w.WriteHeader(response.StatusCode)
+	respBody := []byte(response.Body)
+	w.Write(respBody)
 
 	log.Println("api handler finished")
 }
