@@ -157,8 +157,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 
 	response, ok := <-server.ch
 	if !ok {
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("private server closed connection"))
+		http.Error(w, "private server closed connection", http.StatusBadGateway)
 		return
 	}
 
@@ -167,7 +166,10 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(response.StatusCode)
 	respBody := []byte(response.Body)
-	w.Write(respBody)
+	_, err = w.Write(respBody)
+	if err != nil {
+		log.Println("Error writing response body:", err)
+	}
 
 	log.Println("api handler finished")
 }
