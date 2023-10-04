@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const httpHeaderPrivateServerID = "X-Private-Server-ID"
@@ -97,22 +98,41 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Unlock()
 
-	for {
-		var msg webSocketResponseMessage
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("Error while reading: %v", err)
-			break
-		}
-		ch <- msg
-	}
-	log.Printf("websocket connection closed (id:%s)\n", serverInfo.PrivateServerID)
+	defer func() {
+		log.Printf("websocket connection closed (id:%s)\n", serverInfo.PrivateServerID)
 
-	mu.Lock()
-	delete(privateServer, serverInfo.PrivateServerID)
-	mu.Unlock()
-	close(ch)
-	log.Printf("removed private server (id:%s) from list\n", serverInfo.PrivateServerID)
+		mu.Lock()
+		delete(privateServer, serverInfo.PrivateServerID)
+		mu.Unlock()
+		close(ch)
+		log.Printf("removed private server (id:%s) from list\n", serverInfo.PrivateServerID)
+	}()
+
+	go func() {
+		for {
+			var msg webSocketResponseMessage
+			err := conn.ReadJSON(&msg)
+			if err != nil {
+				log.Printf("Error while reading: %v", err)
+				return
+			}
+			ch <- msg
+		}
+	}()
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			err := conn.WriteMessage(websocket.PingMessage, []byte{})
+			if err != nil {
+				log.Println("Error while sending ping:", err)
+				return
+			}
+		}
+	}
 }
 
 func apiHandler(w http.ResponseWriter, r *http.Request) {
