@@ -58,6 +58,8 @@ func initConfig() {
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
+
 	initConfig()
 
 	r := mux.NewRouter()
@@ -72,6 +74,8 @@ func main() {
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
+	defer log.Println("wsHandler finished")
+
 	log.Println("call websocket handler")
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -108,23 +112,30 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("removed private server (id:%s) from list\n", serverInfo.PrivateServerID)
 	}()
 
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	done := make(chan struct{})
+	defer close(done)
+
 	go func() {
 		for {
 			var msg webSocketResponseMessage
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				log.Printf("Error while reading: %v", err)
+				ticker.Stop()
+				done <- struct{}{}
 				return
 			}
 			ch <- msg
 		}
 	}()
 
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
 	for {
 		select {
+		case <-done:
+			return
 		case <-ticker.C:
 			err := conn.WriteMessage(websocket.PingMessage, []byte{})
 			if err != nil {
@@ -133,19 +144,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
 }
 
 func apiHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("call api handler")
 	requestID := uuid.New().String()
+	fmt.Println("call api handler for requestID:", requestID)
 
 	serverID := r.Header.Get(httpHeaderPrivateServerID)
-	log.Println("call api for private server id:", serverID)
+	log.Printf("[req:%s] %s in header: %s\n", requestID, httpHeaderPrivateServerID, serverID)
 
 	mu.Lock()
 	server, ok := privateServer[serverID]
 	mu.Unlock()
 	if !ok {
+		log.Printf("[req:%s] private server not found\n", requestID)
 		http.Error(w, "private server not found", http.StatusBadGateway)
 		return
 	}
@@ -169,17 +182,24 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		Body:      string(body),
 	}
 
+	log.Printf("[req:%s] try to sent method: %s, path: %s\n", requestID, msg.Method, msg.Path)
+
 	err := server.ws.WriteJSON(msg)
 	if err != nil {
-		http.Error(w, "Failed to send to client", http.StatusInternalServerError)
+		log.Printf("[req:%s] Error while sending request to private server: %v\n", requestID, err)
+		http.Error(w, "failed to send request to private server", http.StatusInternalServerError)
 		return
 	}
 
+	log.Printf("[req:%s] wait for response from private server\n", requestID)
 	response, ok := <-server.ch
 	if !ok {
+		log.Printf("[req:%s] private server closed connection\n", requestID)
 		http.Error(w, "private server closed connection", http.StatusBadGateway)
 		return
 	}
+
+	log.Printf("[req:%s] received response from private server\n", requestID)
 
 	for k, v := range response.Header {
 		w.Header().Set(k, v)
@@ -191,5 +211,5 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Error writing response body:", err)
 	}
 
-	log.Println("api handler finished")
+	log.Printf("[req:%s] already responsed, api handler finished\n", requestID)
 }
