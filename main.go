@@ -5,52 +5,71 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/spf13/viper"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 )
 
-type clientConnection struct {
-	WS *websocket.Conn
-	ch chan WebSocketResponse
+type privateServerConnection struct {
+	ws *websocket.Conn
+	ch chan webSocketResponse
 }
 
 var upgrader = websocket.Upgrader{}
-var clients = make(map[string]clientConnection)
+var privateServer = make(map[string]privateServerConnection)
 var mu sync.Mutex
 
-type InitialWSMessage struct {
-	ClientID string `json:"client_id"`
+type serverInfoMessage struct {
+	PrivateServerID string `json:"private_server_id"`
 }
 
-type WebSocketMessage struct {
+type webSocketMessage struct {
+	RequestID string            `json:"request_id"`
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Header    map[string]string `json:"header"`
 	Query     string            `json:"query"`
 	Body      string            `json:"body"`
-	RequestID string            `json:"request_id"`
 }
 
-type WebSocketResponse struct {
+type webSocketResponse struct {
+	RequestID  string            `json:"request_id"`
 	StatusCode int               `json:"status_code"`
 	Header     map[string]string `json:"header"`
 	Body       string            `json:"body"`
-	RequestID  string            `json:"request_id"`
+}
+
+func initConfig() {
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AutomaticEnv()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	err := viper.ReadInConfig()
+	if err != nil {
+		log.Fatal("Error reading config file:", err)
+	}
 }
 
 func main() {
+	initConfig()
+
 	r := mux.NewRouter()
 	r.HandleFunc("/ws", wsHandler)
+
+	// handle all other requests
 	r.PathPrefix("/").HandlerFunc(apiHandler)
 
 	http.Handle("/", r)
-	fmt.Println("Server started at :9999")
-	log.Fatal(http.ListenAndServe(":9999", nil))
+	fmt.Printf("Server started at port: %v...\n", viper.GetInt("service.port"))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", viper.GetInt("service.port")), nil))
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("WS handler")
+	log.Println("call websocket handler")
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal("Upgrade:", err)
@@ -58,27 +77,25 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	var initialMsg InitialWSMessage
-	err = conn.ReadJSON(&initialMsg)
+	var serverInfo serverInfoMessage
+	err = conn.ReadJSON(&serverInfo)
 	if err != nil {
-		log.Printf("Error while reading initial message: %v", err)
+		log.Printf("Error while reading server info message: %v", err)
 		return
 	}
+	log.Println("received server info message, private_server_id:", serverInfo.PrivateServerID)
 
-	log.Println("Client ID:", initialMsg.ClientID)
+	ch := make(chan webSocketResponse)
 
-	ch := make(chan WebSocketResponse)
-
-	clientID := initialMsg.ClientID
 	mu.Lock()
-	clients[clientID] = clientConnection{
-		WS: conn,
+	privateServer[serverInfo.PrivateServerID] = privateServerConnection{
+		ws: conn,
 		ch: ch,
 	}
 	mu.Unlock()
 
 	for {
-		var msg WebSocketResponse
+		var msg webSocketResponse
 		err := conn.ReadJSON(&msg)
 		if err != nil {
 			log.Printf("Error while reading: %v", err)
@@ -88,7 +105,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	delete(clients, clientID)
+	delete(privateServer, serverInfo.PrivateServerID)
 	mu.Unlock()
 }
 
@@ -100,7 +117,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Client ID:", clientID)
 
 	mu.Lock()
-	client, ok := clients[clientID]
+	client, ok := privateServer[clientID]
 	mu.Unlock()
 
 	if !ok {
@@ -113,7 +130,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		header[k] = v[0]
 	}
 
-	msg := WebSocketMessage{
+	msg := webSocketMessage{
 		Method:    r.Method,
 		Path:      r.URL.Path,
 		Header:    header,
@@ -122,7 +139,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		RequestID: requestID,
 	}
 
-	err := client.WS.WriteJSON(msg)
+	err := client.ws.WriteJSON(msg)
 	if err != nil {
 		http.Error(w, "Failed to send to client", http.StatusInternalServerError)
 		return
