@@ -1,4 +1,4 @@
-# rest2ws
+# Cloud Bridger
 
 **Cloud Bridger** for REST to WebSockets
 
