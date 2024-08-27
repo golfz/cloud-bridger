@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -63,7 +64,12 @@ func main() {
 	initConfig()
 
 	r := mux.NewRouter()
+
+	// websocket handler
 	r.HandleFunc("/ws", wsHandler)
+
+	// health check
+	r.HandleFunc("/health", healthHandler)
 
 	// handle all other requests
 	r.PathPrefix("/").HandlerFunc(apiHandler)
@@ -212,4 +218,17 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[req:%s] already responsed, api handler finished\n", requestID)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	resp := struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}{
+		Status:  "UP",
+		Message: fmt.Sprintf("Service is healthy, local=%d, time=%s", len(privateServer), time.Now().Format(time.RFC3339)),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
